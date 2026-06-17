@@ -1,9 +1,11 @@
-from flask import Flask, request, send_file, jsonify
+from flask import Flask, request, send_file, jsonify, redirect
 from flask_cors import CORS
 import yt_dlp
 import os
 import tempfile
 from pathlib import Path
+import requests
+import re
 
 app = Flask(__name__)
 CORS(app)
@@ -80,51 +82,58 @@ def download_video():
         if not url:
             return jsonify({'error': 'URL is required'}), 400
 
-        # Create temp directory
-        temp_dir = tempfile.mkdtemp()
-        output_path = os.path.join(temp_dir, '%(title)s.%(ext)s')
+        video_id = extract_video_id(url)
+        if not video_id:
+            return jsonify({'error': 'Invalid YouTube URL'}), 400
 
-        # Format selection based on quality
-        quality_map = {
-            '2160': 'bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]',
-            '1080': 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]',
-            '720': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]',
-            '480': 'bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]',
-        }
+        # Get video info from Invidious
+        try:
+            invidious_url = f'https://api.invidious.io/videos/{video_id}'
+            response = requests.get(invidious_url, timeout=10)
 
-        format_string = quality_map.get(quality, quality_map['720'])
+            if response.status_code == 200:
+                info = response.json()
+                title = info.get('title', 'video')
 
-        ydl_opts = {
-            'format': format_string,
-            'outtmpl': output_path,
-            'quiet': False,
-            'no_warnings': True,
-            'socket_timeout': 60,
-            'retries': 3,
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'DNT': '1',
-                'Referer': 'https://www.youtube.com/',
-            },
-            'skip_unavailable_fragments': True,
-            'postprocessors': [{
-                'key': 'FFmpegVideoConvertor',
-                'preferedformat': 'mp4',
-            }],
-        }
+                # Get adaptive formats (video + audio combined)
+                formats = info.get('formatStreams', [])
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            video_file = ydl.prepare_filename(info)
+                # Map quality to format
+                quality_map = {
+                    '2160': 2160,
+                    '1080': 1080,
+                    '720': 720,
+                    '480': 480,
+                }
 
-            return send_file(
-                video_file,
-                as_attachment=True,
-                download_name=f"{info.get('title', 'video')}.mp4",
-                mimetype='video/mp4'
-            )
+                target_height = quality_map.get(quality, 720)
+
+                # Find best format matching quality
+                selected_format = None
+                for fmt in formats:
+                    if fmt.get('resolution'):
+                        height = int(fmt['resolution'].split('x')[1])
+                        if height <= target_height:
+                            if not selected_format or height > int(selected_format['resolution'].split('x')[1]):
+                                selected_format = fmt
+
+                if selected_format and selected_format.get('url'):
+                    # Redirect to the Invidious stream URL
+                    stream_url = selected_format['url']
+                    return send_file(
+                        requests.get(stream_url, stream=True, timeout=60).raw,
+                        mimetype='video/mp4',
+                        as_attachment=True,
+                        download_name=f"{title}.mp4"
+                    )
+        except Exception as e:
+            print(f"Invidious error: {e}")
+
+        # Fallback: Redirect to y2meta
+        return redirect(
+            f"https://y2meta.com/?url={requests.utils.quote(url)}&vt=mp4&q={quality}",
+            code=303
+        )
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
