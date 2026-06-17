@@ -66,12 +66,16 @@ def get_video_info():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/download', methods=['POST'])
+@app.route('/download', methods=['GET', 'POST'])
 def download_video():
     try:
-        data = request.json
-        url = data.get('url')
-        quality = data.get('quality', '720')
+        if request.method == 'POST':
+            data = request.json
+            url = data.get('url')
+            quality = data.get('quality', '720')
+        else:
+            url = request.args.get('url')
+            quality = request.args.get('quality', '720')
 
         if not url:
             return jsonify({'error': 'URL is required'}), 400
